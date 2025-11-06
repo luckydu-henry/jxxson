@@ -1,0 +1,670 @@
+//
+// MIT License
+// 
+// Copyright (c) 2025 Henry Du
+// 
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+// 
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+// 
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+
+#include <format>
+#include <ranges>
+#include <string>
+#include <vector>
+#include <cstdint>
+#include <utility>
+#include <concepts>
+#include <algorithm>
+#include <string_view>
+#include <type_traits>
+
+namespace jxxson {
+
+    enum class document_tree_node_type : std::uint8_t {
+        null,
+        boolean,
+        integer,
+        floating_point,
+        string,
+        array,
+        object,
+        root
+    };
+
+    static constexpr struct document_node_root_tag_type   { std::size_t padding; } document_node_root_tag{};
+    static constexpr struct document_node_array_tag_type  { std::size_t padding; } document_node_array_tag{};
+    static constexpr struct document_node_object_tag_type { std::size_t padding; } document_node_object_tag{};
+
+    template <typename Integer = int, typename FloatingPoint = float, class CharT = char, class BufferAllocator = std::allocator<CharT>>
+    class document_node_value {
+    public:
+        using string              = std::basic_string<CharT, std::char_traits<CharT>, BufferAllocator>;
+        using string_view         = std::basic_string_view<CharT, std::char_traits<CharT>>;
+        using int_type            = Integer;
+        using float_type          = FloatingPoint;
+
+        document_tree_node_type type = document_tree_node_type::null;
+        string                  buffer;
+
+        constexpr document_node_value() = default;
+        constexpr document_node_value(const document_node_value&) = default;
+        constexpr document_node_value(document_node_value&&) = default;
+        constexpr document_node_value& operator=(const document_node_value&) = default;
+        constexpr document_node_value& operator=(document_node_value&&) = default;
+        constexpr ~document_node_value() = default;
+        
+        constexpr document_node_value(const bool           b, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::boolean),          buffer(reinterpret_cast<const char*>(&b), sizeof(b), a) {}
+        constexpr document_node_value(const int_type       i, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::integer),          buffer(reinterpret_cast<const char*>(&i), sizeof(i), a) {}
+        constexpr document_node_value(const float_type     f, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::floating_point),   buffer(reinterpret_cast<const char*>(&f), sizeof(f), a) {}
+        constexpr document_node_value(const string_view    s, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::string),           buffer(s, a) {}
+        constexpr document_node_value(const string&        s, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::string),           buffer(s, a) {}
+        constexpr document_node_value(const CharT*         s, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::string),           buffer(s, a) {}
+
+        constexpr document_node_value(const decltype(document_node_root_tag)   r, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::root),   buffer(reinterpret_cast<const char*>(&r), sizeof(r), a) {}
+        constexpr document_node_value(const decltype(document_node_array_tag)  r, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::array),  buffer(reinterpret_cast<const char*>(&r), sizeof(r), a) {}
+        constexpr document_node_value(const decltype(document_node_object_tag) r, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::object), buffer(reinterpret_cast<const char*>(&r), sizeof(r), a) {}
+
+        template <typename Ty> constexpr Ty& as() {
+            if constexpr (std::is_same_v<Ty, string>) { return buffer; }
+            return *reinterpret_cast<Ty*>(buffer.data());
+        }
+
+        template <typename Ty> constexpr auto as() const {
+            if constexpr (std::is_same_v<Ty, string>) { return string_view(buffer); }
+            return *reinterpret_cast<const Ty*>(buffer.data());
+        }
+
+        constexpr bool parent_type()   const { return type == document_tree_node_type::object || type == document_tree_node_type::array || type == document_tree_node_type::root; }
+        constexpr auto get_allocator() const { return buffer.get_allocator(); }
+
+        // This is a value formatter.
+        template <bool IsBegin, class OutputIt>
+        constexpr OutputIt format_to(OutputIt out) {
+            constexpr CharT  out_null [4]  = {CharT{'n'}, CharT{'u'}, CharT{'l'}, CharT{'l'}};
+            constexpr CharT  out_true [4]  = {CharT{'t'}, CharT{'r'}, CharT{'u'}, CharT{'e'}};
+            constexpr CharT  out_false[5]  = {CharT{'f'}, CharT{'a'}, CharT{'l'}, CharT{'s'}, CharT{'e'}};
+            if constexpr (IsBegin) {
+                switch (type) {
+                case document_tree_node_type::null:    {          out = std::ranges::copy(out_null, out).out; break; } 
+                case document_tree_node_type::boolean: {
+                    if (as<bool>()) { out = std::ranges::copy(out_true, out).out; }
+                    else { out = std::ranges::copy(out_false, out).out; }
+                    break;
+                }
+                case document_tree_node_type::integer: {
+                    if constexpr (std::is_same_v<CharT, wchar_t>) {
+                        out = std::ranges::copy(std::format(L"{:d}", as<int_type>()), out).out; break;
+                    } else { out = std::ranges::copy(std::format("{:d}", as<int_type>()), out).out; break; }
+                }
+                case document_tree_node_type::floating_point: {
+                    if constexpr (std::is_same_v<CharT, wchar_t>) {
+                        out = std::ranges::copy(std::format(L"{:f}", as<float_type>()), out).out; break;
+                    } else { out = std::ranges::copy(std::format("{:f}", as<float_type>()), out).out; break; }
+                }
+                case document_tree_node_type::string:           { *out++ = CharT{'\"'}; out = std::ranges::copy(buffer, out).out; *out++ = CharT{'\"'}; break; }
+                case document_tree_node_type::object: *out++ = CharT{'{'}; break;
+                case document_tree_node_type::array:  *out++ = CharT{'['}; break;
+                case document_tree_node_type::root: break;
+                }
+            } else {
+                switch (type) {
+                default: break;
+                case document_tree_node_type::object: *out++ = CharT{'}'}; break;
+                case document_tree_node_type::array:  *out++ = CharT{']'}; break; 
+                }
+            }
+            return out;
+        }
+        
+    };
+
+    template <typename Integer = int, typename FloatingPoint = float, class CharT = char, class BufferAllocator = std::allocator<CharT>>
+    class document_tree_node {
+    public:
+        using string              = std::basic_string<CharT, std::char_traits<CharT>, BufferAllocator>;
+        using string_view         = std::basic_string_view<CharT, std::char_traits<CharT>>;
+        using pointer             = document_tree_node*;
+        using const_pointer       = const document_tree_node*;
+        using reference           = document_tree_node&;
+        using const_reference     = const document_tree_node&;
+        using int_type            = Integer;
+        using float_type          = FloatingPoint;
+        using value_type          = document_node_value<int_type, float_type, CharT, BufferAllocator>;
+    private:
+        string            name_;
+        value_type        value_;
+        std::ptrdiff_t    pid_ = -1;
+        bool              tombed_ = false;
+    public:
+
+        constexpr document_tree_node(pointer parent, pointer beg, string_view n, value_type v)
+            : name_(n), value_(std::move(v)), pid_(parent != nullptr ? parent - beg : -1) {}
+
+        constexpr document_tree_node(const document_tree_node&)              = default;
+        constexpr document_tree_node(document_tree_node&&)                   = default;
+        constexpr document_tree_node& operator=(const document_tree_node&)   = default;
+        constexpr document_tree_node& operator=(document_tree_node&&)        = default;
+        constexpr ~document_tree_node()                                      = default;
+
+        constexpr bool              dying()           const { return tombed_; }
+        constexpr void              dying(bool v)           { tombed_ = v; }
+        constexpr string&           name()                  { return name_; }
+        constexpr string_view       name()            const { return name_; }
+        constexpr value_type&       value()                 { return value_; }
+        constexpr value_type        value()           const { return value_; }
+        constexpr auto              get_allocator()   const { return value_.get_allocator(); }
+        constexpr std::ptrdiff_t&   parent_index()          { return pid_; }
+        constexpr std::ptrdiff_t    parent_index()    const { return pid_; }
+    };
+
+    template <class JsonTree>
+    class document_tree_node_const_iterator {
+        public:
+        using tree_type         = JsonTree;
+        using string_view       = typename tree_type::string_view;
+        using difference_type   = std::ptrdiff_t;
+        using iterator_category = std::random_access_iterator_tag;
+        using iterator_concept  = std::contiguous_iterator_tag;
+
+        using node_value          = typename tree_type::node_value;
+        using value_type         = typename tree_type::value_type;
+        using pointer            = typename tree_type::const_pointer;
+        using reference          = typename tree_type::const_reference;
+        using container_iterator = typename tree_type::container_const_iterator;
+    protected:
+        pointer       node_ptr_ = nullptr;
+        tree_type*    tree_ptr_ = nullptr;
+    public:
+        ~document_tree_node_const_iterator() = default;
+        constexpr document_tree_node_const_iterator(const document_tree_node_const_iterator&) = default;
+        constexpr document_tree_node_const_iterator(document_tree_node_const_iterator&&) = default;
+        constexpr document_tree_node_const_iterator() = default;
+        
+        constexpr document_tree_node_const_iterator(const tree_type* const tp, const pointer np)
+            : node_ptr_(const_cast<pointer>(np)), tree_ptr_(const_cast<tree_type*>(tp)) {}
+
+        constexpr document_tree_node_const_iterator& operator=(const document_tree_node_const_iterator&) = default;
+        constexpr document_tree_node_const_iterator& operator=(document_tree_node_const_iterator&&)      = default;
+
+        constexpr reference       operator*()               const { return *node_ptr_; }
+        constexpr pointer         operator->()              const { return node_ptr_; }
+
+        constexpr document_tree_node_const_iterator& operator++()                             { ++node_ptr_; return *this; }
+        constexpr document_tree_node_const_iterator  operator++(int)                          { return document_tree_node_const_iterator( tree_ptr_, node_ptr_++); }
+        constexpr document_tree_node_const_iterator& operator+=(const std::ptrdiff_t d)       { node_ptr_ += d; return *this; }
+        constexpr document_tree_node_const_iterator  operator+ (const std::ptrdiff_t d) const { return document_tree_node_const_iterator(tree_ptr_, node_ptr_ + d); }
+
+        constexpr document_tree_node_const_iterator& operator--()                             { --node_ptr_; return *this; }
+        constexpr document_tree_node_const_iterator  operator--(int)                          { return document_tree_node_const_iterator(tree_ptr_, node_ptr_--); }
+        constexpr document_tree_node_const_iterator& operator-=(const std::ptrdiff_t d)       { node_ptr_ -= d; return *this; }
+        constexpr document_tree_node_const_iterator  operator- (const std::ptrdiff_t d) const { return document_tree_node_const_iterator(tree_ptr_, node_ptr_ - d); }
+        
+        constexpr bool operator==(const document_tree_node_const_iterator& right) const { return tree_ptr_ == right.tree_ptr_ && node_ptr_ == right.node_ptr_; }
+        constexpr bool operator!=(const document_tree_node_const_iterator& right) const { return node_ptr_ != right.node_ptr_ || tree_ptr_ != right.tree_ptr_; }
+        constexpr bool operator< (const document_tree_node_const_iterator& right) const { return tree_ptr_ == right.tree_ptr_ && node_ptr_ <  right.node_ptr_; }
+        constexpr bool operator> (const document_tree_node_const_iterator& right) const { return tree_ptr_ == right.tree_ptr_ && node_ptr_ >  right.node_ptr_; }
+        constexpr bool operator<=(const document_tree_node_const_iterator& right) const { return tree_ptr_ == right.tree_ptr_ && node_ptr_ <= right.node_ptr_; }
+        constexpr bool operator>=(const document_tree_node_const_iterator& right) const { return tree_ptr_ == right.tree_ptr_ && node_ptr_ >= right.node_ptr_; }
+
+        constexpr std::ptrdiff_t                      operator-(const document_tree_node_const_iterator& rhs) const { return node_ptr_ - rhs.node_ptr_; }
+        constexpr friend document_tree_node_const_iterator operator+(const std::ptrdiff_t d, const document_tree_node_const_iterator& it) { return it + d; }
+
+        constexpr document_tree_node_const_iterator parent()                        const {
+            return node_ptr_->parent_index() != -1 ? document_tree_node_const_iterator(tree_ptr_, tree_ptr_->data() + node_ptr_->parent_index()) : *this;
+        }
+        constexpr document_tree_node_const_iterator child_begin()                   const {
+            return tree_ptr_->search_child_begin(*this);
+        }
+        constexpr document_tree_node_const_iterator child_end()                     const {
+            return tree_ptr_->search_child_end(*this);
+        }
+        constexpr document_tree_node_const_iterator child_rbegin()                  const {
+            return child_end() - 1;
+        }
+        constexpr document_tree_node_const_iterator child_rend()                    const {
+            return child_begin() - 1;
+        }
+        // Next not unknow node.
+        constexpr document_tree_node_const_iterator sibling_next()                          const {
+            auto it = *this;
+            for (++it; it != parent().child_end() && !it->dying(); ++it) {}
+            return it;
+        }
+
+        constexpr document_tree_node_const_iterator sibling_prev()                          const {
+            auto it = *this;
+            for (--it; it != parent().child_rend() && !it->dying(); --it) {}
+            return it;
+        }
+
+        constexpr auto  operator[](string_view name) const { return tree_ptr_->access(*this, name); }
+        constexpr auto  operator[](std::size_t id)   const { return tree_ptr_->access(*this, id); }
+    };
+
+    template <class JsonTree>
+    class document_tree_node_iterator : protected document_tree_node_const_iterator<JsonTree> {
+        using base = document_tree_node_const_iterator<JsonTree>;
+        constexpr document_tree_node_iterator(const base& right) : base(right) {}
+    public:
+        using tree_type         = typename base::tree_type;
+        using difference_type   = typename base::difference_type;
+        using iterator_category = typename base::iterator_category;
+        using iterator_concept  = typename base::iterator_concept;
+        
+        using node_value          = typename tree_type::node_value;
+        using string_view         = typename tree_type::string_view;
+        using value_type          = typename tree_type::value_type;
+        using pointer             = typename tree_type::pointer;
+        using reference           = typename tree_type::reference;
+        using container_iterator  = typename tree_type::container_iterator;
+    protected:
+        using base::node_ptr_;
+        using base::tree_ptr_;
+    public:
+        ~document_tree_node_iterator() = default;
+        constexpr document_tree_node_iterator(const document_tree_node_iterator&) = default;
+        constexpr document_tree_node_iterator(document_tree_node_iterator&&)      = default;
+        constexpr document_tree_node_iterator() = default;
+        
+        constexpr document_tree_node_iterator(const tree_type* const tp, const pointer np)            : base(tp, np) {}
+
+        constexpr document_tree_node_iterator& operator=(const document_tree_node_iterator&) = default;
+        constexpr document_tree_node_iterator& operator=(document_tree_node_iterator&&)      = default;
+
+        constexpr reference       operator*()               const { return const_cast<reference>(base::operator*()); }
+        constexpr pointer         operator->()              const { return const_cast<pointer>  (base::operator->()); }
+
+        constexpr document_tree_node_iterator& operator++()                             { base::operator++(); return *this; }
+        constexpr document_tree_node_iterator  operator++(int)                          { return base::operator++(0); }
+        constexpr document_tree_node_iterator& operator+=(const std::ptrdiff_t d)       { base::operator+=(d); return *this; }
+        constexpr document_tree_node_iterator  operator+ (const std::ptrdiff_t d) const { return base::operator+ (d); }
+
+        constexpr document_tree_node_iterator& operator--()                             { base::operator--(); return *this;  }
+        constexpr document_tree_node_iterator  operator--(int)                          { return base::operator--(0); }
+        constexpr document_tree_node_iterator& operator-=(const std::ptrdiff_t d)       { base::operator-=(d); return *this; }
+        constexpr document_tree_node_iterator  operator- (const std::ptrdiff_t d) const { return base::operator- (d); }
+
+        constexpr bool operator==(const document_tree_node_iterator& right) const { return base::operator==(right); }
+        constexpr bool operator!=(const document_tree_node_iterator& right) const { return base::operator!=(right); }
+        constexpr bool operator< (const document_tree_node_iterator& right) const { return base::operator<(right); }
+        constexpr bool operator> (const document_tree_node_iterator& right) const { return base::operator>(right); }
+        constexpr bool operator<=(const document_tree_node_iterator& right) const { return base::operator<=(right); }
+        constexpr bool operator>=(const document_tree_node_iterator& right) const { return base::operator>=(right); }
+        
+        constexpr std::ptrdiff_t                operator-(const document_tree_node_iterator& rhs) const { return base::operator-(rhs); }
+        constexpr friend document_tree_node_iterator operator+(const std::ptrdiff_t d, const document_tree_node_iterator& it) { return it + d; }
+
+        constexpr document_tree_node_iterator parent()                  const { return base::parent(); }
+        
+        constexpr document_tree_node_iterator child_begin()             const { return base::child_begin();  }
+        constexpr document_tree_node_iterator child_end()               const { return base::child_end();    }
+        constexpr document_tree_node_iterator child_rbegin()            const { return base::child_rbegin(); }
+        constexpr document_tree_node_iterator child_rend()              const { return base::child_rend(); }
+        constexpr document_tree_node_iterator sibling_next()            const { return base::sibling_next(); }
+        constexpr document_tree_node_iterator sibling_prev()            const { return base::sibling_prev(); }
+
+        constexpr document_tree_node_iterator emplace(string_view name, const node_value& value) {
+            return tree_ptr_->emplace(*this, name, value);
+        }
+
+        constexpr auto   operator[](string_view name)       { return tree_ptr_->insert_or_access(*this, name); }
+        constexpr auto   operator[](std::size_t id)         { return tree_ptr_->insert_or_access(*this, id); }
+        constexpr auto   operator[](string_view name) const { return tree_ptr_->access(*this, name); }
+        constexpr auto   operator[](std::size_t id)   const { return tree_ptr_->access(*this, id); }
+
+        constexpr document_tree_node_iterator remove() {
+            tree_ptr_->remove(*this);
+            return tree_ptr_->begin();
+        }
+    };
+
+    template <typename Integer         = int,
+              typename FloatingPoint   = float,
+              class CharT = char,
+              class BufferAllocator = std::allocator<CharT>,
+              class TreeAllocator   = std::allocator<document_tree_node<Integer, FloatingPoint, CharT, BufferAllocator>>
+    >
+    class document_tree {
+    public:
+        using string_view       = std::basic_string_view<CharT, std::char_traits<CharT>>;
+        using string            = std::basic_string<CharT, std::char_traits<CharT>, BufferAllocator>;
+        using node_value        = document_node_value<Integer, FloatingPoint, CharT, BufferAllocator>;
+        using float_type        = FloatingPoint;
+        using int_type          = Integer;
+        
+        using allocator_type    = TreeAllocator;
+        using value_type        = document_tree_node<Integer, FloatingPoint, CharT, BufferAllocator>;
+        using reference         = value_type&;
+        using const_reference   = const value_type&;
+        using pointer           = value_type*;
+        using const_pointer     = const value_type*;
+        using difference_type   = std::ptrdiff_t;
+
+        using container                        = std::vector<value_type, allocator_type>;
+        using container_iterator               = typename container::iterator;
+        using container_const_iterator         = typename container::const_iterator;
+        using container_reverse_iterator       = typename container::reverse_iterator;
+        using container_const_reverse_iterator = typename container::const_reverse_iterator;
+
+        using iterator               = document_tree_node_iterator<document_tree>;
+        using const_iterator         = document_tree_node_const_iterator<document_tree>;
+        using reverse_iterator       = std::reverse_iterator<iterator>;
+        using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    protected:
+        container       nodes_;
+        
+        static constexpr auto upper_bound_proj = [](const value_type& v) { return v.parent_index(); };
+
+        template <class ... Args>
+        constexpr document_tree(allocator_type alloc, std::size_t init_cap, pointer parent, Args&& ... args) : nodes_(alloc) {
+            if (parent->value().type)
+            nodes_.reserve(init_cap);
+            emplace_back_(parent, std::forward<Args>(args)...);
+        }
+
+        template <class ... Args>
+        constexpr container_iterator emplace_back_(pointer parent, Args&& ... args) {
+            return nodes_.emplace(nodes_.end(), parent, std::forward<Args>(args)...);
+        }
+        
+        template <class ... Args>
+        constexpr container_iterator emplace_sorted_(pointer parent, Args&& ... args) {
+            auto insert_pos = std::ranges::upper_bound(nodes_, parent - data(), std::less<difference_type>(), upper_bound_proj) - nodes_.begin();
+            auto update_itr = std::ranges::upper_bound(nodes_, insert_pos - 1 , std::less<difference_type>(), upper_bound_proj);
+            std::ranges::for_each(update_itr, nodes_.end(), [](value_type& nd) { ++nd.parent_index(); });
+            return nodes_.emplace(nodes_.begin() + insert_pos, parent, std::forward<Args>(args)...);
+        }
+        
+        template <class ... Args>
+        constexpr container_iterator emplace_auto_(pointer parent, Args&& ... args) {
+            if (parent->value().parent_type()) {
+                return parent - data() >= nodes_.back().parent_index() ?
+                emplace_back_(parent, std::forward<Args>(args)...) : emplace_sorted_(parent, std::forward<Args>(args)...);
+            }
+            return nodes_.end();
+        }
+
+        constexpr void               tag_current_and_all_children_to_unknow_(container_iterator root) {
+            if (root == nodes_.end()) {
+                return;
+            }
+            root->dying(true);
+            auto beg = std::ranges::upper_bound(root, nodes_.end(), root - nodes_.begin() - 1, std::less<difference_type>(), upper_bound_proj);
+            auto end = std::ranges::upper_bound(root, nodes_.end(), root - nodes_.begin(),     std::less<difference_type>(), upper_bound_proj);
+            for (;beg != end; ++beg) {
+                tag_current_and_all_children_to_unknow_(beg);
+            }
+        }
+
+        constexpr container_iterator erase_single_node_and_rotate_(container_iterator which) {
+            auto dbg = std::ranges::upper_bound(nodes_, which - nodes_.begin() - 1, std::less<difference_type>(), upper_bound_proj);
+            std::ranges::for_each(dbg, nodes_.end(), [](value_type& n) { --n.parent_index(); });
+            return nodes_.erase(which);
+        }
+
+        constexpr container_iterator erase_all_unknows_(container_iterator from) {
+            for (;from != nodes_.end(); ++from) {
+                if (from->dying()) {  from = erase_single_node_and_rotate_(from); --from; }
+            }
+            return from;
+        }
+
+        ///////////////////////////////////////////////////////////////////////////////////
+        ///                             Output Method                                   ///
+        ///////////////////////////////////////////////////////////////////////////////////
+
+        template <class OutputIt>
+        constexpr OutputIt format_to_impl(std::size_t depth, const_iterator it, OutputIt out) const {
+            if (it == end()) {
+                return out;
+            }
+            const bool is_parent_t_node  = it->value().parent_type();
+            const bool is_last_sibling   = it == it.parent().child_rbegin();
+            out = std::ranges::fill_n(out, depth << 1, CharT{' '});
+            if (!it->name().empty()) {
+                *out++ = CharT{'\"'};
+                 out   = std::ranges::copy(it->name(), out).out;
+                *out++ = CharT{'\"'};
+                *out++ = CharT{':'};
+            }
+            out = it->value().template format_to<true>(out);
+            if (!is_parent_t_node && !is_last_sibling) { *out++ = CharT{','}; } *out++ = CharT{'\n'};
+            for (auto c = it.child_begin(); c != it.child_end(); ++c) {
+                out = format_to_impl(depth + 1, c, out);
+            }
+            if (is_parent_t_node) { out = std::ranges::fill_n(out, depth << 1, CharT{' '}); }
+            out = it->value().template format_to<false>(out);
+            if (is_parent_t_node) {
+                if (!is_last_sibling) { *out++ = CharT{','}; }
+                *out++ = CharT{'\n'};
+            }
+            return out;
+        }
+
+        ///////////////////////////////////////////////////////////////////////////////////
+        ///                             Input Methods                                   ///
+        ///////////////////////////////////////////////////////////////////////////////////
+
+        template <class InputIt>
+        static constexpr InputIt parse_spaces(InputIt beg, InputIt end) {
+            for (;beg != end && std::isspace(*beg); ++beg) { }
+            return beg;
+        }
+        
+        template <class InputIt>
+        static constexpr InputIt parse_name_or_string(bool& is_name, string& str, InputIt beg, InputIt end) {
+            for (;beg != end && *beg != CharT{'\"'}; ++beg) { str.push_back(*beg); } ++beg;
+            beg = parse_spaces(beg, end);
+            if (*beg == CharT{':'}) { is_name = true; ++beg; }
+            else { is_name = false; } 
+            return beg;
+        }
+
+        template <class InputIt>
+        static constexpr InputIt parse_number(bool& is_float, string& buffer, InputIt beg, InputIt end) {
+            for (;beg != end && (std::isalnum(*beg) || *beg == CharT{'.'} || *beg == CharT{'+'} || *beg == CharT{'-'}); ++beg) {
+                if (*beg == CharT{'.'} || *beg == CharT{'e'} || *beg == CharT{'E'}) {
+                    is_float = true;
+                }
+                buffer.push_back(*beg);
+            }
+            return beg;
+        }
+
+        template <typename Ty>
+        static constexpr auto   emplace_value(iterator current, iterator current_parent, Ty&& value) {
+            if (current_parent->value().type == document_tree_node_type::array) {
+                current = current_parent.emplace(string_view(), std::forward<Ty>(value));
+            } else { current->value() = std::forward<Ty>(value); }
+            return current;
+        }
+        
+        template <class InputIt>
+        InputIt construct_from_impl(string& buffer, iterator current, iterator current_parent, InputIt beg, InputIt end) {
+            for (;beg != end;) {
+                if (std::isspace(*beg))  { beg = parse_spaces(beg, end); }
+                else if (*beg == CharT{'\"'}) {
+                    bool is_name = false; ++beg;
+                    beg = parse_name_or_string(is_name, buffer, beg, end);
+                    current = is_name ? emplace(current_parent, buffer, {}) : emplace_value(current, current_parent, buffer);  
+                    buffer.clear();
+                }
+                else if (*beg == CharT{'{'}) {
+                    current = current->name().empty() ?  emplace(current_parent, "", document_node_object_tag) : emplace_value(current, current_parent, document_node_object_tag); 
+                    current_parent = current; ++beg;
+                }
+                else if (*beg == CharT{'['}) {
+                    current = current->name().empty() ? emplace(current_parent, "", document_node_array_tag) : emplace_value(current, current_parent, document_node_array_tag); 
+                    current_parent = current; ++beg;
+                }
+                else if (*beg == CharT{'}'} || *beg == CharT{']'}) {
+                    current = current_parent;
+                    current_parent = current_parent.parent(); ++beg;
+                }
+                else if (std::isdigit(*beg) || *beg == CharT{'-'}) {
+                    bool is_float = false;
+                    beg = parse_number(is_float, buffer, beg, end);
+                    if (is_float) {
+                        float_type f;
+                        std::from_chars(buffer.data(), buffer.data() + buffer.size(), f, std::chars_format::general);
+                        emplace_value(current, current_parent, f);
+                    } else {
+                        int_type i;
+                        std::from_chars(buffer.data(), buffer.data() + buffer.size(), i, 10);
+                        emplace_value(current, current_parent, i);
+                    }
+                    buffer.clear();
+                }
+                else if (*beg == CharT{'t'}) {
+                    ++beg; if (*beg != CharT{'r'}) { break; }
+                    ++beg; if (*beg != CharT{'u'}) { break; }
+                    ++beg; if (*beg != CharT{'e'}) { break; } ++beg;
+                    emplace_value(current, current_parent, true);
+                }
+                else if (*beg == CharT{'f'}) {
+                    ++beg; if (*beg != CharT{'a'}) { break; }
+                    ++beg; if (*beg != CharT{'l'}) { break; }
+                    ++beg; if (*beg != CharT{'s'}) { break; }
+                    ++beg; if (*beg != CharT{'e'}) { break; } ++beg;
+                    emplace_value(current, current_parent, false);
+                }
+                else if (*beg == CharT{'n'}) {
+                    ++beg; if (*beg != CharT{'u'}) { break; }
+                    ++beg; if (*beg != CharT{'l'}) { break; }
+                    ++beg; if (*beg != CharT{'l'}) { break; } ++beg;
+                    emplace_value(current, current_parent, node_value{});
+                }
+                else if (*beg == CharT{','}) { ++beg; }
+                else { break; } // Means parsing error.
+            }
+            return beg;
+        }
+
+        template <class JsonTree, class InputIt>
+        friend constexpr InputIt fill_tree(JsonTree& tree, InputIt beg, InputIt end);
+        
+    public:
+
+        constexpr document_tree(std::size_t init_cap = 1024, const BufferAllocator& buf_alloc = BufferAllocator{}, const TreeAllocator& tree_alloc = TreeAllocator{})
+        : nodes_(tree_alloc) {
+            nodes_.reserve(init_cap);
+            emplace_back_(nullptr, data(), "", node_value{document_node_root_tag, buf_alloc});
+        }
+        
+        constexpr std::size_t        size() const noexcept { return nodes_.size(); }
+        constexpr pointer            data()       noexcept { return nodes_.data(); }
+        constexpr const_pointer      data() const noexcept { return nodes_.data(); }
+
+        constexpr decltype(auto)     begin()         { return iterator(this, data());                         }
+        constexpr decltype(auto)     end()           { return iterator(this, data() + size());                }
+        constexpr decltype(auto)     begin()   const { return const_iterator(this, data());                   }
+        constexpr decltype(auto)     end()     const { return const_iterator(this, data() + size());          }
+        constexpr decltype(auto)     cbegin()  const { return const_iterator(this, data());                   }
+        constexpr decltype(auto)     cend()    const { return const_iterator(this, data() + size());          }
+        constexpr decltype(auto)     rbegin()        { return reverse_iterator(end());                        }
+        constexpr decltype(auto)     rend()          { return reverse_iterator(begin());                      }
+        constexpr decltype(auto)     rbegin()  const { return const_reverse_iterator(end());                  }
+        constexpr decltype(auto)     rend()    const { return const_reverse_iterator(begin());                }
+        constexpr decltype(auto)     crbegin() const { return rbegin();                                       }
+        constexpr decltype(auto)     crend()   const { return rend();                                         }
+
+        constexpr iterator       emplace(iterator parent, string_view name, const node_value& value) {
+            return iterator(this, &*emplace_auto_(&*parent, data(), name, value));
+        }
+
+        constexpr const_iterator search_child_begin(const_iterator parent) const {
+            auto it = std::ranges::upper_bound(nodes_.begin() + (parent - begin()), nodes_.end(), parent - begin() - 1, std::less<difference_type>(), upper_bound_proj);
+            return const_iterator(this, it == nodes_.end() || (it->parent_index() != parent - begin()) ? data() + size() : &*it);
+        }
+
+        constexpr const_iterator search_child_end(const_iterator parent) const {
+            auto it = std::ranges::upper_bound(nodes_.begin() + (parent - begin()), nodes_.end(), parent - begin(), std::less<difference_type>(), upper_bound_proj);
+            return const_iterator(this, it == nodes_.end() || ((it - 1)->parent_index() != parent - begin()) ? data() + size() : &*it);
+        }
+
+        constexpr void           remove(iterator which) {
+            tag_current_and_all_children_to_unknow_(nodes_.begin() + (which - begin()));
+        }
+
+        constexpr iterator       erase(iterator from) {
+            auto it = erase_all_unknows_(nodes_.begin() + (from - begin()));
+            return iterator(this, it != nodes_.end() ? &*it : (data() + size()));
+        }
+
+        constexpr iterator           insert_or_access(iterator actual_root, string_view name) {
+            if (actual_root->value().type == document_tree_node_type::object) {
+                auto it = std::ranges::find_if(actual_root.child_begin(), actual_root.child_end(), [name](auto& v) {
+                    return v.name() == name;
+                });
+                if (it == actual_root.child_end()) { return actual_root.emplace(name, {}); }
+                return it;
+            }
+            return begin();
+        }
+
+        constexpr iterator           insert_or_access(iterator actual_root, std::size_t i) {
+            if (actual_root->value().type == document_tree_node_type::array) {
+                const std::size_t diff = actual_root.child_end() - actual_root.child_begin();
+                for (std::size_t j = 0; j != i + 1 - diff; ++j) { actual_root.emplace("", {}); }
+                return (actual_root.child_begin() + i);
+            }
+            return begin();
+        }
+
+        constexpr const_iterator     access(const_iterator actual_root, string_view name) const {
+            if (actual_root->value().type == document_tree_node_type::object) {
+                return std::ranges::find_if(actual_root.child_begin(), actual_root.child_end(), [name](const auto& v) {
+                    return v.name() == name;
+                });
+            }
+            return begin();
+        }
+
+        constexpr const_iterator     access(const_iterator actual_root, std::size_t i) const {
+            if (actual_root->value().type == document_tree_node_type::array) {
+                const std::size_t diff = actual_root.child_end() - actual_root.child_begin();
+                if (diff > i + 1) { return begin(); }
+                return (actual_root.child_begin() + i);
+            }
+            return begin();
+        }
+
+        constexpr iterator           operator[](std::string_view name)       { return insert_or_access(begin() + 1, name); }
+        constexpr iterator           operator[](std::size_t      id)         { return insert_or_access(begin() + 1, id); }
+        constexpr const_iterator     operator[](std::string_view name) const { return access(begin() + 1, name); }
+        constexpr const_iterator     operator[](std::size_t      id)   const { return access(begin() + 1, id); }
+
+        template <class OutputIt>
+        constexpr OutputIt format_to(OutputIt out) const {
+            return format_to_impl(0, begin() + 1, out); // Not format root.
+        }
+        
+    };
+
+    template <class JsonTree, class InputIt>
+    static constexpr InputIt fill_tree(JsonTree& tree, InputIt beg, InputIt end) {
+        typename JsonTree::string buffer; buffer.reserve(2048);
+        return tree.construct_from_impl(buffer, tree.begin(), tree.begin(), beg, end);
+    }
+
+    template <class JsonTree, class CharT> requires std::is_same_v<typename JsonTree::string_view::value_type, CharT>
+    static constexpr auto    fill_tree(JsonTree& tree, std::basic_string_view<CharT, std::char_traits<CharT>> src) {
+        return fill_tree(tree, src.begin(), src.end());
+    }
+    
+}

@@ -29,6 +29,9 @@
 #include "jxxson.hpp"
 
 int main(int argc, char** argv) {
+    using namespace std::string_view_literals;
+    using namespace std::string_literals;
+
     std::ifstream in_json("test.json");
     std::ofstream out_json("test-out.json");
     auto start = std::chrono::high_resolution_clock::now();

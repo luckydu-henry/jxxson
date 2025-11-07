@@ -229,13 +229,12 @@ namespace jxxson {
             return node_ptr_->parent_index() != -1 ? document_tree_node_const_iterator(tree_ptr_, tree_ptr_->data() + node_ptr_->parent_index()) : *this;
         }
         
-        constexpr document_tree_node_const_iterator child_begin()                   const { return tree_ptr_->search_child_begin(*this); }
-        constexpr document_tree_node_const_iterator child_end()                     const { return tree_ptr_->search_child_end(*this); }
-        constexpr document_tree_node_const_iterator child_rbegin()                  const { return child_end() - 1; }
-        constexpr document_tree_node_const_iterator child_rend()                    const { return child_begin() - 1; }
-
-        constexpr auto  operator[](string_view name) const { return tree_ptr_->access(*this, name); }
-        constexpr auto  operator[](std::size_t id)   const { return tree_ptr_->access(*this, id); }
+        constexpr document_tree_node_const_iterator begin()                   const { return tree_ptr_->search_child_begin(*this); }
+        constexpr document_tree_node_const_iterator end()                     const { return tree_ptr_->search_child_end(*this); }
+        constexpr std::size_t                       size()                    const { return end() - begin(); }
+        
+        constexpr auto  find(string_view name) const { return tree_ptr_->access(*this, name); }
+        constexpr auto  find(std::size_t id)   const { return tree_ptr_->access(*this, id); }
     };
 
     template <class JsonTree>
@@ -291,23 +290,23 @@ namespace jxxson {
         constexpr std::ptrdiff_t                operator-(const document_tree_node_iterator& rhs) const { return base::operator-(rhs); }
         constexpr friend document_tree_node_iterator operator+(const std::ptrdiff_t d, const document_tree_node_iterator& it) { return it + d; }
 
-        constexpr document_tree_node_iterator parent()                  const { return base::parent(); }
-        
-        constexpr document_tree_node_iterator child_begin()             const { return base::child_begin();  }
-        constexpr document_tree_node_iterator child_end()               const { return base::child_end();    }
-        constexpr document_tree_node_iterator child_rbegin()            const { return base::child_rbegin(); }
-        constexpr document_tree_node_iterator child_rend()              const { return base::child_rend(); }
-        constexpr document_tree_node_iterator sibling_next()            const { return base::sibling_next(); }
-        constexpr document_tree_node_iterator sibling_prev()            const { return base::sibling_prev(); }
+        constexpr document_tree_node_iterator parent()     const { return base::parent(); }
+        constexpr document_tree_node_iterator begin()      const { return base::begin();  }
+        constexpr document_tree_node_iterator end()        const { return base::end();    }
 
         constexpr document_tree_node_iterator emplace(string_view name, const node_value& value) {
             return tree_ptr_->emplace(*this, name, value);
         }
 
+        constexpr std::size_t                 size() const { return end() - begin(); }
+
         constexpr auto   operator[](string_view name)       { return tree_ptr_->insert_or_access(*this, name); }
         constexpr auto   operator[](std::size_t id)         { return tree_ptr_->insert_or_access(*this, id); }
-        constexpr auto   operator[](string_view name) const { return tree_ptr_->access(*this, name); }
-        constexpr auto   operator[](std::size_t id)   const { return tree_ptr_->access(*this, id); }
+
+        constexpr auto   find(string_view name)             { return tree_ptr_->access(*this, name); }
+        constexpr auto   find(std::size_t id)               { return tree_ptr_->access(*this, id); }
+        constexpr auto   find(string_view name)       const { return tree_ptr_->access(*this, name); }
+        constexpr auto   find(std::size_t id)         const { return tree_ptr_->access(*this, id); }
 
         constexpr document_tree_node_iterator remove() {
             tree_ptr_->remove(*this);
@@ -413,7 +412,7 @@ namespace jxxson {
                 return out;
             }
             const bool is_parent_t_node  = it->value().parent_type();
-            const bool is_last_sibling   = it == it.parent().child_rbegin();
+            const bool is_last_sibling   = it == std::prev(it.parent().end());
             out = std::ranges::fill_n(out, depth << 1, CharT{' '});
             if (!it->name().empty()) {
                 *out++ = CharT{'\"'};
@@ -423,7 +422,7 @@ namespace jxxson {
             }
             out = it->value().template format_to<true>(out);
             if (!is_parent_t_node && !is_last_sibling) { *out++ = CharT{','}; } *out++ = CharT{'\n'};
-            for (auto c = it.child_begin(); c != it.child_end(); ++c) {
+            for (auto c = it.begin(); c != it.end(); ++c) {
                 out = format_to_impl(depth + 1, c, out);
             }
             if (is_parent_t_node) { out = std::ranges::fill_n(out, depth << 1, CharT{' '}); }
@@ -571,15 +570,10 @@ namespace jxxson {
         constexpr decltype(auto)     end()           { return iterator(this, data() + size());                }
         constexpr decltype(auto)     begin()   const { return const_iterator(this, data());                   }
         constexpr decltype(auto)     end()     const { return const_iterator(this, data() + size());          }
-        constexpr decltype(auto)     cbegin()  const { return const_iterator(this, data());                   }
-        constexpr decltype(auto)     cend()    const { return const_iterator(this, data() + size());          }
-        constexpr decltype(auto)     rbegin()        { return reverse_iterator(end());                        }
-        constexpr decltype(auto)     rend()          { return reverse_iterator(begin());                      }
-        constexpr decltype(auto)     rbegin()  const { return const_reverse_iterator(end());                  }
-        constexpr decltype(auto)     rend()    const { return const_reverse_iterator(begin());                }
-        constexpr decltype(auto)     crbegin() const { return rbegin();                                       }
-        constexpr decltype(auto)     crend()   const { return rend();                                         }
 
+        constexpr decltype(auto)     root()    const { return begin() + 1; }
+        constexpr decltype(auto)     root()          { return begin() + 1; }
+        
         constexpr iterator       emplace(iterator parent, string_view name, const node_value& value) {
             return iterator(this, &*emplace_auto_(&*parent, data(), name, value));
         }
@@ -604,30 +598,44 @@ namespace jxxson {
         }
 
         constexpr iterator           insert_or_access(iterator actual_root, string_view name) {
-            auto it = std::ranges::find_if(actual_root.child_begin(), actual_root.child_end(), [name](auto& v) { return v.name() == name; });
-            return it == actual_root.child_end() ? actual_root.emplace(name, {}) : it;
+            auto it = std::ranges::find_if(actual_root.begin(), actual_root.end(), [name](auto& v) { return v.name() == name; });
+            return it == actual_root.end() ? actual_root.emplace(name, {}) : it;
         }
 
         constexpr iterator           insert_or_access(iterator actual_root, std::size_t i) {
-            for (std::ptrdiff_t j = 0; j < static_cast<std::ptrdiff_t>(i + 1 - (actual_root.child_end() - actual_root.child_begin())); ++j) { actual_root.emplace("", {}); }
-            return (actual_root.child_begin() + i);
+            for (std::ptrdiff_t j = 0; j < static_cast<std::ptrdiff_t>(i + 1 - (actual_root.end() - actual_root.begin())); ++j) { actual_root.emplace("", {}); }
+            return (actual_root.begin() + i);
         }
 
         constexpr const_iterator     access(const_iterator actual_root, string_view name) const {
-            return std::ranges::find_if(actual_root.child_begin(), actual_root.child_end(), [name](const auto& v) {
+            return std::ranges::find_if(actual_root.begin(), actual_root.end(), [name](const auto& v) {
                 return v.name() == name;
             });
         }
 
         constexpr const_iterator     access(const_iterator actual_root, std::size_t i) const {
-            if (i + 1 > actual_root.child_end() - actual_root.child_begin()) { return actual_root.child_end(); }
-            return actual_root.child_begin() + i;
+            if (i + 1 > static_cast<std::size_t>(actual_root.end() - actual_root.begin())) { return actual_root.end(); }
+            return actual_root.begin() + i;
+        }
+
+        constexpr iterator           access(iterator actual_root, string_view name) {
+            return std::ranges::find_if(actual_root.begin(), actual_root.end(), [name](const auto& v) {
+                return v.name() == name;
+            });
+        }
+
+        constexpr iterator           access(iterator actual_root, std::size_t i) {
+            if (i + 1 > static_cast<std::size_t>(actual_root.end() - actual_root.begin())) { return actual_root.end(); }
+            return actual_root.begin() + i;
         }
 
         constexpr iterator           operator[](std::string_view name)       { return insert_or_access(begin() + 1, name); }
         constexpr iterator           operator[](std::size_t      id)         { return insert_or_access(begin() + 1, id); }
-        constexpr const_iterator     operator[](std::string_view name) const { return access(begin() + 1, name); }
-        constexpr const_iterator     operator[](std::size_t      id)   const { return access(begin() + 1, id); }
+
+        constexpr iterator           find(std::string_view name)             { return access(begin() + 1, name); }
+        constexpr iterator           find(std::size_t      id)               { return access(begin() + 1, id); }
+        constexpr const_iterator     find(std::string_view name)       const { return access(begin() + 1, name); }
+        constexpr const_iterator     find(std::size_t      id)         const { return access(begin() + 1, id); }
         
         template <class OutputIt>
         constexpr OutputIt format_to(OutputIt out) const {

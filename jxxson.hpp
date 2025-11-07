@@ -1,3 +1,4 @@
+
 //
 // MIT License
 // 
@@ -21,6 +22,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 //
+#pragma once
 
 #include <format>
 #include <ranges>
@@ -28,7 +30,6 @@
 #include <vector>
 #include <cstdint>
 #include <utility>
-#include <concepts>
 #include <algorithm>
 #include <string_view>
 #include <type_traits>
@@ -61,13 +62,13 @@ namespace jxxson {
         document_tree_node_type type = document_tree_node_type::null;
         string                  buffer;
 
-        constexpr document_node_value() = default;
         constexpr document_node_value(const document_node_value&) = default;
         constexpr document_node_value(document_node_value&&) = default;
         constexpr document_node_value& operator=(const document_node_value&) = default;
         constexpr document_node_value& operator=(document_node_value&&) = default;
         constexpr ~document_node_value() = default;
-        
+
+        constexpr document_node_value(const BufferAllocator& a = BufferAllocator{}) : type(document_tree_node_type::null), buffer(a) {}
         constexpr document_node_value(const bool           b, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::boolean),          buffer(reinterpret_cast<const char*>(&b), sizeof(b), a) {}
         constexpr document_node_value(const int_type       i, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::integer),          buffer(reinterpret_cast<const char*>(&i), sizeof(i), a) {}
         constexpr document_node_value(const float_type     f, const BufferAllocator a = BufferAllocator{}) : type(document_tree_node_type::floating_point),   buffer(reinterpret_cast<const char*>(&f), sizeof(f), a) {}
@@ -227,30 +228,11 @@ namespace jxxson {
         constexpr document_tree_node_const_iterator parent()                        const {
             return node_ptr_->parent_index() != -1 ? document_tree_node_const_iterator(tree_ptr_, tree_ptr_->data() + node_ptr_->parent_index()) : *this;
         }
-        constexpr document_tree_node_const_iterator child_begin()                   const {
-            return tree_ptr_->search_child_begin(*this);
-        }
-        constexpr document_tree_node_const_iterator child_end()                     const {
-            return tree_ptr_->search_child_end(*this);
-        }
-        constexpr document_tree_node_const_iterator child_rbegin()                  const {
-            return child_end() - 1;
-        }
-        constexpr document_tree_node_const_iterator child_rend()                    const {
-            return child_begin() - 1;
-        }
-        // Next not unknow node.
-        constexpr document_tree_node_const_iterator sibling_next()                          const {
-            auto it = *this;
-            for (++it; it != parent().child_end() && !it->dying(); ++it) {}
-            return it;
-        }
-
-        constexpr document_tree_node_const_iterator sibling_prev()                          const {
-            auto it = *this;
-            for (--it; it != parent().child_rend() && !it->dying(); --it) {}
-            return it;
-        }
+        
+        constexpr document_tree_node_const_iterator child_begin()                   const { return tree_ptr_->search_child_begin(*this); }
+        constexpr document_tree_node_const_iterator child_end()                     const { return tree_ptr_->search_child_end(*this); }
+        constexpr document_tree_node_const_iterator child_rbegin()                  const { return child_end() - 1; }
+        constexpr document_tree_node_const_iterator child_rend()                    const { return child_begin() - 1; }
 
         constexpr auto  operator[](string_view name) const { return tree_ptr_->access(*this, name); }
         constexpr auto  operator[](std::size_t id)   const { return tree_ptr_->access(*this, id); }
@@ -335,9 +317,10 @@ namespace jxxson {
 
     template <typename Integer         = int,
               typename FloatingPoint   = float,
-              class CharT = char,
-              class BufferAllocator = std::allocator<CharT>,
-              class TreeAllocator   = std::allocator<document_tree_node<Integer, FloatingPoint, CharT, BufferAllocator>>
+    
+              class CharT              = char,
+              class BufferAllocator    = std::allocator<CharT>,
+              class TreeAllocator      = std::allocator<document_tree_node<Integer, FloatingPoint, CharT, BufferAllocator>>
     >
     class document_tree {
     public:
@@ -365,9 +348,9 @@ namespace jxxson {
         using const_iterator         = document_tree_node_const_iterator<document_tree>;
         using reverse_iterator       = std::reverse_iterator<iterator>;
         using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
     protected:
-        container       nodes_;
-        
+        container             nodes_;
         static constexpr auto upper_bound_proj = [](const value_type& v) { return v.parent_index(); };
 
         template <class ... Args>
@@ -400,15 +383,11 @@ namespace jxxson {
         }
 
         constexpr void               tag_current_and_all_children_to_unknow_(container_iterator root) {
-            if (root == nodes_.end()) {
-                return;
-            }
+            if (root == nodes_.end()) { return; }
             root->dying(true);
             auto beg = std::ranges::upper_bound(root, nodes_.end(), root - nodes_.begin() - 1, std::less<difference_type>(), upper_bound_proj);
             auto end = std::ranges::upper_bound(root, nodes_.end(), root - nodes_.begin(),     std::less<difference_type>(), upper_bound_proj);
-            for (;beg != end; ++beg) {
-                tag_current_and_all_children_to_unknow_(beg);
-            }
+            for (;beg != end; ++beg) { tag_current_and_all_children_to_unknow_(beg); }
         }
 
         constexpr container_iterator erase_single_node_and_rotate_(container_iterator which) {
@@ -497,60 +476,78 @@ namespace jxxson {
         template <class InputIt>
         InputIt construct_from_impl(string& buffer, iterator current, iterator current_parent, InputIt beg, InputIt end) {
             for (;beg != end;) {
-                if (std::isspace(*beg))  { beg = parse_spaces(beg, end); }
-                else if (*beg == CharT{'\"'}) {
+                switch (*beg) {
+                default: return beg;
+                case CharT{' '}:
+                case CharT{'\n'}:
+                case CharT{'\t'}:
+                case CharT{'\r'}: beg = parse_spaces(beg, end); break;
+                case CharT{'\"'}: {
                     bool is_name = false; ++beg;
                     beg = parse_name_or_string(is_name, buffer, beg, end);
-                    current = is_name ? emplace(current_parent, buffer, {}) : emplace_value(current, current_parent, buffer);  
+                    current = is_name ? emplace(current_parent, buffer, {}) : emplace_value(current, current_parent,  node_value(buffer, nodes_[0].get_allocator()));  
                     buffer.clear();
-                }
-                else if (*beg == CharT{'{'}) {
-                    current = current->name().empty() ?  emplace(current_parent, "", document_node_object_tag) : emplace_value(current, current_parent, document_node_object_tag); 
+                } break;
+                case CharT{'{'}: {
+                    current = current->name().empty() ?  emplace(current_parent, "", document_node_object_tag) :
+                    emplace_value(current, current_parent, node_value(document_node_object_tag, nodes_[0].get_allocator())); 
                     current_parent = current; ++beg;
-                }
-                else if (*beg == CharT{'['}) {
-                    current = current->name().empty() ? emplace(current_parent, "", document_node_array_tag) : emplace_value(current, current_parent, document_node_array_tag); 
+                } break;
+                case CharT{'['}: {
+                    current = current->name().empty() ? emplace(current_parent, "", document_node_array_tag) :
+                    emplace_value(current, current_parent, node_value(document_node_array_tag, nodes_[0].get_allocator()));
                     current_parent = current; ++beg;
-                }
-                else if (*beg == CharT{'}'} || *beg == CharT{']'}) {
+                } break;
+                case CharT{'}'}:
+                case CharT{']'}:{
                     current = current_parent;
                     current_parent = current_parent.parent(); ++beg;
-                }
-                else if (std::isdigit(*beg) || *beg == CharT{'-'}) {
+                } break;
+                case CharT{'0'}:
+                case CharT{'1'}:
+                case CharT{'2'}:
+                case CharT{'3'}:
+                case CharT{'4'}:
+                case CharT{'5'}:
+                case CharT{'6'}:
+                case CharT{'7'}:
+                case CharT{'8'}:
+                case CharT{'9'}:
+                case CharT{'-'}: {
                     bool is_float = false;
                     beg = parse_number(is_float, buffer, beg, end);
                     if (is_float) {
                         float_type f;
                         std::from_chars(buffer.data(), buffer.data() + buffer.size(), f, std::chars_format::general);
-                        emplace_value(current, current_parent, f);
+                        emplace_value(current, current_parent, node_value(f, nodes_[0].get_allocator()));
                     } else {
                         int_type i;
                         std::from_chars(buffer.data(), buffer.data() + buffer.size(), i, 10);
-                        emplace_value(current, current_parent, i);
+                        emplace_value(current, current_parent, node_value(i, nodes_[0].get_allocator()));
                     }
                     buffer.clear();
-                }
-                else if (*beg == CharT{'t'}) {
+                } break;
+                case CharT{'t'}: {
                     ++beg; if (*beg != CharT{'r'}) { break; }
                     ++beg; if (*beg != CharT{'u'}) { break; }
                     ++beg; if (*beg != CharT{'e'}) { break; } ++beg;
-                    emplace_value(current, current_parent, true);
-                }
-                else if (*beg == CharT{'f'}) {
+                    emplace_value(current, current_parent, node_value(true, nodes_[0].get_allocator()));
+                } break;
+                case CharT{'f'}: {
                     ++beg; if (*beg != CharT{'a'}) { break; }
                     ++beg; if (*beg != CharT{'l'}) { break; }
                     ++beg; if (*beg != CharT{'s'}) { break; }
                     ++beg; if (*beg != CharT{'e'}) { break; } ++beg;
-                    emplace_value(current, current_parent, false);
-                }
-                else if (*beg == CharT{'n'}) {
+                    emplace_value(current, current_parent, node_value(false, nodes_[0].get_allocator()));
+                } break;
+                case CharT{'n'}: {
                     ++beg; if (*beg != CharT{'u'}) { break; }
                     ++beg; if (*beg != CharT{'l'}) { break; }
                     ++beg; if (*beg != CharT{'l'}) { break; } ++beg;
-                    emplace_value(current, current_parent, node_value{});
+                    emplace_value(current, current_parent, node_value(nodes_[0].get_allocator()));
                 }
-                else if (*beg == CharT{','}) { ++beg; }
-                else { break; } // Means parsing error.
+                case CharT{','}: ++beg; break;
+                }
             }
             return beg;
         }
@@ -607,53 +604,35 @@ namespace jxxson {
         }
 
         constexpr iterator           insert_or_access(iterator actual_root, string_view name) {
-            if (actual_root->value().type == document_tree_node_type::object) {
-                auto it = std::ranges::find_if(actual_root.child_begin(), actual_root.child_end(), [name](auto& v) {
-                    return v.name() == name;
-                });
-                if (it == actual_root.child_end()) { return actual_root.emplace(name, {}); }
-                return it;
-            }
-            return begin();
+            auto it = std::ranges::find_if(actual_root.child_begin(), actual_root.child_end(), [name](auto& v) { return v.name() == name; });
+            return it == actual_root.child_end() ? actual_root.emplace(name, {}) : it;
         }
 
         constexpr iterator           insert_or_access(iterator actual_root, std::size_t i) {
-            if (actual_root->value().type == document_tree_node_type::array) {
-                const std::size_t diff = actual_root.child_end() - actual_root.child_begin();
-                for (std::size_t j = 0; j != i + 1 - diff; ++j) { actual_root.emplace("", {}); }
-                return (actual_root.child_begin() + i);
-            }
-            return begin();
+            for (std::ptrdiff_t j = 0; j < static_cast<std::ptrdiff_t>(i + 1 - (actual_root.child_end() - actual_root.child_begin())); ++j) { actual_root.emplace("", {}); }
+            return (actual_root.child_begin() + i);
         }
 
         constexpr const_iterator     access(const_iterator actual_root, string_view name) const {
-            if (actual_root->value().type == document_tree_node_type::object) {
-                return std::ranges::find_if(actual_root.child_begin(), actual_root.child_end(), [name](const auto& v) {
-                    return v.name() == name;
-                });
-            }
-            return begin();
+            return std::ranges::find_if(actual_root.child_begin(), actual_root.child_end(), [name](const auto& v) {
+                return v.name() == name;
+            });
         }
 
         constexpr const_iterator     access(const_iterator actual_root, std::size_t i) const {
-            if (actual_root->value().type == document_tree_node_type::array) {
-                const std::size_t diff = actual_root.child_end() - actual_root.child_begin();
-                if (diff > i + 1) { return begin(); }
-                return (actual_root.child_begin() + i);
-            }
-            return begin();
+            if (i + 1 > actual_root.child_end() - actual_root.child_begin()) { return actual_root.child_end(); }
+            return actual_root.child_begin() + i;
         }
 
         constexpr iterator           operator[](std::string_view name)       { return insert_or_access(begin() + 1, name); }
         constexpr iterator           operator[](std::size_t      id)         { return insert_or_access(begin() + 1, id); }
         constexpr const_iterator     operator[](std::string_view name) const { return access(begin() + 1, name); }
         constexpr const_iterator     operator[](std::size_t      id)   const { return access(begin() + 1, id); }
-
+        
         template <class OutputIt>
         constexpr OutputIt format_to(OutputIt out) const {
-            return format_to_impl(0, begin() + 1, out); // Not format root.
+            return format_to_impl(0, begin() + 1, out);  // Not format root.
         }
-        
     };
 
     template <class JsonTree, class InputIt>
@@ -662,7 +641,7 @@ namespace jxxson {
         return tree.construct_from_impl(buffer, tree.begin(), tree.begin(), beg, end);
     }
 
-    template <class JsonTree, class CharT> requires std::is_same_v<typename JsonTree::string_view::value_type, CharT>
+    template <class JsonTree, class CharT>
     static constexpr auto    fill_tree(JsonTree& tree, std::basic_string_view<CharT, std::char_traits<CharT>> src) {
         return fill_tree(tree, src.begin(), src.end());
     }

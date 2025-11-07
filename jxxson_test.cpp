@@ -24,16 +24,20 @@
 
 #include <iostream>
 #include <fstream>
+#include <chrono>
 
 #include "jxxson.hpp"
 
 int main(int argc, char** argv) {
-    using namespace std::string_view_literals;
-    using namespace std::string_literals;
-
     std::ifstream in_json("test.json");
     std::ofstream out_json("test-out.json");
+    auto start = std::chrono::high_resolution_clock::now();
     jxxson::document_tree<> tree{16777216};
     jxxson::fill_tree(tree, std::istreambuf_iterator<char>(in_json), std::istreambuf_iterator<char>());
+    auto middle = std::chrono::high_resolution_clock::now();
     tree.format_to(std::ostreambuf_iterator<char>(out_json));
+    auto stop = std::chrono::high_resolution_clock::now();
+
+    std::cout << std::format("Input  time costs: {}\n", std::chrono::duration<double>(middle - start));
+    std::cout << std::format("Output time costs: {}\n", std::chrono::duration<double>(stop   - middle));
 }

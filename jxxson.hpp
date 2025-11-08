@@ -33,9 +33,9 @@
 #include <algorithm>
 #include <string_view>
 #include <type_traits>
+#include <forward_list>
 
 namespace jxxson {
-
     enum class document_tree_node_type : std::uint8_t {
         null,
         boolean,
@@ -152,10 +152,13 @@ namespace jxxson {
         std::ptrdiff_t    pid_ = -1;
         bool              tombed_ = false;
     public:
-
         constexpr document_tree_node(pointer parent, pointer beg, string_view n, value_type v)
             : name_(n), value_(std::move(v)), pid_(parent != nullptr ? parent - beg : -1) {}
 
+        constexpr document_tree_node(std::ptrdiff_t pid, string_view n, value_type v)
+            : name_(n), value_(std::move(v)), pid_(pid) {}
+
+        constexpr document_tree_node()                                       = default;
         constexpr document_tree_node(const document_tree_node&)              = default;
         constexpr document_tree_node(document_tree_node&&)                   = default;
         constexpr document_tree_node& operator=(const document_tree_node&)   = default;
@@ -175,7 +178,7 @@ namespace jxxson {
 
     template <class JsonTree>
     class document_tree_node_const_iterator {
-        public:
+    public:
         using tree_type         = JsonTree;
         using string_view       = typename tree_type::string_view;
         using difference_type   = std::ptrdiff_t;
@@ -232,9 +235,8 @@ namespace jxxson {
         constexpr document_tree_node_const_iterator begin()                   const { return tree_ptr_->search_child_begin(*this); }
         constexpr document_tree_node_const_iterator end()                     const { return tree_ptr_->search_child_end(*this); }
         constexpr std::size_t                       size()                    const { return end() - begin(); }
-        
-        constexpr auto  find(string_view name) const { return tree_ptr_->access(*this, name); }
-        constexpr auto  find(std::size_t id)   const { return tree_ptr_->access(*this, id); }
+        constexpr auto                              find(string_view name) const { return tree_ptr_->access(*this, name); }
+        constexpr auto                              find(std::size_t id)   const { return tree_ptr_->access(*this, id); }
     };
 
     template <class JsonTree>
@@ -293,16 +295,14 @@ namespace jxxson {
         constexpr document_tree_node_iterator parent()     const { return base::parent(); }
         constexpr document_tree_node_iterator begin()      const { return base::begin();  }
         constexpr document_tree_node_iterator end()        const { return base::end();    }
+        constexpr std::size_t                 size()       const { return end() - begin(); }
 
         constexpr document_tree_node_iterator emplace(string_view name, const node_value& value) {
             return tree_ptr_->emplace(*this, name, value);
         }
 
-        constexpr std::size_t                 size() const { return end() - begin(); }
-
         constexpr auto   operator[](string_view name)       { return tree_ptr_->insert_or_access(*this, name); }
         constexpr auto   operator[](std::size_t id)         { return tree_ptr_->insert_or_access(*this, id); }
-
         constexpr auto   find(string_view name)             { return tree_ptr_->access(*this, name); }
         constexpr auto   find(std::size_t id)               { return tree_ptr_->access(*this, id); }
         constexpr auto   find(string_view name)       const { return tree_ptr_->access(*this, name); }
@@ -313,13 +313,70 @@ namespace jxxson {
             return tree_ptr_->begin();
         }
     };
+    
+    template <typename Integer         = int,
+              typename FloatingPoint   = float,
+              class CharT              = char,
+              class BufferAllocator    = std::allocator<CharT>,
+              template <class Ty> class TreeAllocator = std::allocator
+    >
+    class document_tree_batch_inserter {
+        struct inserter_node;
+    public:
+        using string_view        = std::basic_string_view<CharT, std::char_traits<CharT>>;
+        using string             = std::basic_string<CharT, std::char_traits<CharT>, BufferAllocator>;
+        using node_value         = document_node_value<Integer, FloatingPoint, CharT, BufferAllocator>;
+        using float_type         = FloatingPoint;
+        using int_type           = Integer;
+
+        using container_allocator = TreeAllocator<inserter_node>;
+        using container           = std::forward_list<inserter_node, container_allocator>;
+        using container_iterator  = typename container::iterator;
+        
+        constexpr document_tree_batch_inserter(const document_tree_batch_inserter&) = default;
+        constexpr document_tree_batch_inserter(document_tree_batch_inserter&&)      = default;
+        constexpr document_tree_batch_inserter& operator=(const document_tree_batch_inserter&) = default;
+        constexpr document_tree_batch_inserter& operator=(document_tree_batch_inserter&&)      = default;
+        
+        constexpr document_tree_batch_inserter(const BufferAllocator& buf_alloc = BufferAllocator{}, const container_allocator& tree_alloc = container_allocator{})
+        : nodes_(tree_alloc), max_depth_(0) {
+            tail_ = nodes_.emplace_after(nodes_.before_begin(), 0, nodes_.end(), string_view(), node_value(document_node_root_tag, buf_alloc), buf_alloc); ++size_;
+        }
+
+        constexpr container_iterator emplace(container_iterator parent, string_view name, node_value&& value, const BufferAllocator& ba = BufferAllocator{}) {
+            std::size_t d = 1; for (auto it = parent; it != root(); it = it->parent) { ++d; }
+            tail_ = nodes_.emplace_after(tail_, d, parent, name, std::move(value), ba);
+            max_depth_ = std::max(max_depth_, d); ++size_;
+            return tail_;
+        }
+
+        constexpr container_iterator root()        { return nodes_.begin(); }
+        constexpr std::size_t        depth() const { return max_depth_; }
+        constexpr std::size_t        size()  const { return size_; }
+
+        constexpr container_iterator begin()   { return nodes_.begin(); }
+        constexpr container_iterator end()     { return nodes_.end(); }
+    private:
+        struct inserter_node {
+            std::size_t        depth;
+            container_iterator parent;
+            string             name;
+            node_value         value;
+            std::size_t        index = 0;
+            constexpr inserter_node(std::size_t d, container_iterator parent, string_view name, node_value&& value, const BufferAllocator& ba = BufferAllocator{})
+            : depth(d), parent(parent), name(name, ba), value(std::move(value)) {}
+        };
+        container          nodes_;
+        container_iterator tail_;
+        std::size_t        max_depth_;
+        std::size_t        size_ = 0;
+    };
 
     template <typename Integer         = int,
               typename FloatingPoint   = float,
-    
-              class CharT              = char,
-              class BufferAllocator    = std::allocator<CharT>,
-              class TreeAllocator      = std::allocator<document_tree_node<Integer, FloatingPoint, CharT, BufferAllocator>>
+              class    CharT           = char,
+              class    BufferAllocator = std::allocator<CharT>,
+              class    TreeAllocator   = std::allocator<document_tree_node<Integer, FloatingPoint, CharT, BufferAllocator>>
     >
     class document_tree {
     public:
@@ -345,9 +402,6 @@ namespace jxxson {
 
         using iterator               = document_tree_node_iterator<document_tree>;
         using const_iterator         = document_tree_node_const_iterator<document_tree>;
-        using reverse_iterator       = std::reverse_iterator<iterator>;
-        using const_reverse_iterator = std::reverse_iterator<const_iterator>;
-
     protected:
         container             nodes_;
         static constexpr auto upper_bound_proj = [](const value_type& v) { return v.parent_index(); };
@@ -434,128 +488,9 @@ namespace jxxson {
             return out;
         }
 
-        ///////////////////////////////////////////////////////////////////////////////////
-        ///                             Input Methods                                   ///
-        ///////////////////////////////////////////////////////////////////////////////////
-
-        template <class InputIt>
-        static constexpr InputIt parse_spaces(InputIt beg, InputIt end) {
-            for (;beg != end && std::isspace(*beg); ++beg) { }
-            return beg;
-        }
-        
-        template <class InputIt>
-        static constexpr InputIt parse_name_or_string(bool& is_name, string& str, InputIt beg, InputIt end) {
-            for (;beg != end && *beg != CharT{'\"'}; ++beg) { str.push_back(*beg); } ++beg;
-            beg = parse_spaces(beg, end);
-            if (*beg == CharT{':'}) { is_name = true; ++beg; }
-            else { is_name = false; } 
-            return beg;
-        }
-
-        template <class InputIt>
-        static constexpr InputIt parse_number(bool& is_float, string& buffer, InputIt beg, InputIt end) {
-            for (;beg != end && (std::isalnum(*beg) || *beg == CharT{'.'} || *beg == CharT{'+'} || *beg == CharT{'-'}); ++beg) {
-                if (*beg == CharT{'.'} || *beg == CharT{'e'} || *beg == CharT{'E'}) {
-                    is_float = true;
-                }
-                buffer.push_back(*beg);
-            }
-            return beg;
-        }
-
-        template <typename Ty>
-        static constexpr auto   emplace_value(iterator current, iterator current_parent, Ty&& value) {
-            if (current_parent->value().type == document_tree_node_type::array) {
-                current = current_parent.emplace(string_view(), std::forward<Ty>(value));
-            } else { current->value() = std::forward<Ty>(value); }
-            return current;
-        }
-        
-        template <class InputIt>
-        InputIt construct_from_impl(string& buffer, iterator current, iterator current_parent, InputIt beg, InputIt end) {
-            for (;beg != end;) {
-                switch (*beg) {
-                default: return beg;
-                case CharT{' '}:
-                case CharT{'\n'}:
-                case CharT{'\t'}:
-                case CharT{'\r'}: beg = parse_spaces(beg, end); break;
-                case CharT{'\"'}: {
-                    bool is_name = false; ++beg;
-                    beg = parse_name_or_string(is_name, buffer, beg, end);
-                    current = is_name ? emplace(current_parent, buffer, {}) : emplace_value(current, current_parent,  node_value(buffer, nodes_[0].get_allocator()));  
-                    buffer.clear();
-                } break;
-                case CharT{'{'}: {
-                    current = current->name().empty() ?  emplace(current_parent, "", document_node_object_tag) :
-                    emplace_value(current, current_parent, node_value(document_node_object_tag, nodes_[0].get_allocator())); 
-                    current_parent = current; ++beg;
-                } break;
-                case CharT{'['}: {
-                    current = current->name().empty() ? emplace(current_parent, "", document_node_array_tag) :
-                    emplace_value(current, current_parent, node_value(document_node_array_tag, nodes_[0].get_allocator()));
-                    current_parent = current; ++beg;
-                } break;
-                case CharT{'}'}:
-                case CharT{']'}:{
-                    current = current_parent;
-                    current_parent = current_parent.parent(); ++beg;
-                } break;
-                case CharT{'0'}:
-                case CharT{'1'}:
-                case CharT{'2'}:
-                case CharT{'3'}:
-                case CharT{'4'}:
-                case CharT{'5'}:
-                case CharT{'6'}:
-                case CharT{'7'}:
-                case CharT{'8'}:
-                case CharT{'9'}:
-                case CharT{'-'}: {
-                    bool is_float = false;
-                    beg = parse_number(is_float, buffer, beg, end);
-                    if (is_float) {
-                        float_type f;
-                        std::from_chars(buffer.data(), buffer.data() + buffer.size(), f, std::chars_format::general);
-                        emplace_value(current, current_parent, node_value(f, nodes_[0].get_allocator()));
-                    } else {
-                        int_type i;
-                        std::from_chars(buffer.data(), buffer.data() + buffer.size(), i, 10);
-                        emplace_value(current, current_parent, node_value(i, nodes_[0].get_allocator()));
-                    }
-                    buffer.clear();
-                } break;
-                case CharT{'t'}: {
-                    ++beg; if (*beg != CharT{'r'}) { break; }
-                    ++beg; if (*beg != CharT{'u'}) { break; }
-                    ++beg; if (*beg != CharT{'e'}) { break; } ++beg;
-                    emplace_value(current, current_parent, node_value(true, nodes_[0].get_allocator()));
-                } break;
-                case CharT{'f'}: {
-                    ++beg; if (*beg != CharT{'a'}) { break; }
-                    ++beg; if (*beg != CharT{'l'}) { break; }
-                    ++beg; if (*beg != CharT{'s'}) { break; }
-                    ++beg; if (*beg != CharT{'e'}) { break; } ++beg;
-                    emplace_value(current, current_parent, node_value(false, nodes_[0].get_allocator()));
-                } break;
-                case CharT{'n'}: {
-                    ++beg; if (*beg != CharT{'u'}) { break; }
-                    ++beg; if (*beg != CharT{'l'}) { break; }
-                    ++beg; if (*beg != CharT{'l'}) { break; } ++beg;
-                    emplace_value(current, current_parent, node_value(nodes_[0].get_allocator()));
-                }
-                case CharT{','}: ++beg; break;
-                }
-            }
-            return beg;
-        }
-
-        template <class JsonTree, class InputIt>
-        friend constexpr InputIt fill_tree(JsonTree& tree, InputIt beg, InputIt end);
-        
+        template <template <class Ty> class InserterAllocator, class JsonTree>
+        friend class document_tree_parser;
     public:
-
         constexpr document_tree(std::size_t init_cap = 1024, const BufferAllocator& buf_alloc = BufferAllocator{}, const TreeAllocator& tree_alloc = TreeAllocator{})
         : nodes_(tree_alloc) {
             nodes_.reserve(init_cap);
@@ -565,12 +500,10 @@ namespace jxxson {
         constexpr std::size_t        size() const noexcept { return nodes_.size(); }
         constexpr pointer            data()       noexcept { return nodes_.data(); }
         constexpr const_pointer      data() const noexcept { return nodes_.data(); }
-
         constexpr decltype(auto)     begin()         { return iterator(this, data());                         }
         constexpr decltype(auto)     end()           { return iterator(this, data() + size());                }
         constexpr decltype(auto)     begin()   const { return const_iterator(this, data());                   }
         constexpr decltype(auto)     end()     const { return const_iterator(this, data() + size());          }
-
         constexpr decltype(auto)     root()    const { return begin() + 1; }
         constexpr decltype(auto)     root()          { return begin() + 1; }
         
@@ -608,30 +541,31 @@ namespace jxxson {
         }
 
         constexpr const_iterator     access(const_iterator actual_root, string_view name) const {
-            return std::ranges::find_if(actual_root.begin(), actual_root.end(), [name](const auto& v) {
+            auto it = std::ranges::find_if(actual_root.begin(), actual_root.end(), [name](const auto& v) {
                 return v.name() == name;
             });
+            return it == actual_root.end() ? end() : it;
         }
 
         constexpr const_iterator     access(const_iterator actual_root, std::size_t i) const {
-            if (i + 1 > static_cast<std::size_t>(actual_root.end() - actual_root.begin())) { return actual_root.end(); }
+            if (i + 1 > static_cast<std::size_t>(actual_root.end() - actual_root.begin())) { return end(); }
             return actual_root.begin() + i;
         }
 
         constexpr iterator           access(iterator actual_root, string_view name) {
-            return std::ranges::find_if(actual_root.begin(), actual_root.end(), [name](const auto& v) {
+            auto it = std::ranges::find_if(actual_root.begin(), actual_root.end(), [name](const auto& v) {
                 return v.name() == name;
             });
+            return it == actual_root.end() ? end() : it;
         }
 
         constexpr iterator           access(iterator actual_root, std::size_t i) {
-            if (i + 1 > static_cast<std::size_t>(actual_root.end() - actual_root.begin())) { return actual_root.end(); }
+            if (i + 1 > static_cast<std::size_t>(actual_root.end() - actual_root.begin())) { return end(); }
             return actual_root.begin() + i;
         }
 
         constexpr iterator           operator[](std::string_view name)       { return insert_or_access(begin() + 1, name); }
         constexpr iterator           operator[](std::size_t      id)         { return insert_or_access(begin() + 1, id); }
-
         constexpr iterator           find(std::string_view name)             { return access(begin() + 1, name); }
         constexpr iterator           find(std::size_t      id)               { return access(begin() + 1, id); }
         constexpr const_iterator     find(std::string_view name)       const { return access(begin() + 1, name); }
@@ -643,15 +577,133 @@ namespace jxxson {
         }
     };
 
-    template <class JsonTree, class InputIt>
-    static constexpr InputIt fill_tree(JsonTree& tree, InputIt beg, InputIt end) {
-        typename JsonTree::string buffer; buffer.reserve(2048);
-        return tree.construct_from_impl(buffer, tree.begin(), tree.begin(), beg, end);
-    }
+    template <template <class Ty> class InserterAllocator = std::allocator, class JsonTree = document_tree<>>
+    class document_tree_parser {
+    public:
+        using int_type           = typename JsonTree::int_type;
+        using float_type         = typename JsonTree::float_type;
+        using string_view        = typename JsonTree::string_view;
+        using string             = typename JsonTree::string;
+        using char_type          = typename JsonTree::string::value_type;
+        using node_value         = typename JsonTree::node_value;
+        using inserter           = document_tree_batch_inserter<int_type, float_type, char_type, typename string::allocator_type, InserterAllocator>;
+        using inserter_allocator = typename inserter::container_allocator;
 
-    template <class JsonTree, class CharT>
-    static constexpr auto    fill_tree(JsonTree& tree, std::basic_string_view<CharT, std::char_traits<CharT>> src) {
-        return fill_tree(tree, src.begin(), src.end());
-    }
-    
+        JsonTree& tree;
+
+        template <class InputIt>
+        static constexpr InputIt parse_spaces(InputIt beg, InputIt end) {
+            for (;beg != end && std::isspace(*beg); ++beg) { }
+            return beg;
+        }
+        
+        template <class InputIt>
+        static constexpr InputIt parse_name_or_string(bool& is_name, string& str, InputIt beg, InputIt end) {
+            for (;beg != end && *beg != char_type{'\"'}; ++beg) { str.push_back(*beg); } ++beg;
+            beg = parse_spaces(beg, end);
+            if (*beg == char_type{':'}) { is_name = true; ++beg; }
+            else { is_name = false; } 
+            return beg;
+        }
+
+        template <class InputIt>
+        static constexpr InputIt parse_number(bool& is_float, string& buffer, InputIt beg, InputIt end) {
+            for (;beg != end && (std::isalnum(*beg) || *beg == char_type{'.'} || *beg == char_type{'+'} || *beg == char_type{'-'}); ++beg) {
+                if (*beg == char_type{'.'} || *beg == char_type{'e'} || *beg == char_type{'E'}) {
+                    is_float = true;
+                }
+                buffer.push_back(*beg);
+            }
+            return beg;
+        }
+
+        template <typename Ty>
+        static constexpr auto   emplace_value(inserter& inserter, typename inserter::container_iterator current, typename inserter::container_iterator current_parent, Ty&& value) {
+            if (current_parent->value.type == document_tree_node_type::array) {
+                current = inserter.emplace(current_parent, string_view(), std::forward<Ty>(value));
+            } else { current->value = std::forward<Ty>(value); }
+            return current;
+        }
+
+        template <class InputIt>
+        constexpr InputIt operator()(InputIt beg, InputIt end, const typename string::allocator_type& sa = typename string::allocator_type{},  const inserter_allocator& ia = inserter_allocator{}) {
+            string                                   buffer; buffer.reserve(2048);
+            inserter                                 inserter{sa, ia};
+            typename inserter::container_iterator    current = inserter.root(), current_parent = inserter.root();
+            for (;beg != end;) {
+                switch (*beg) {
+                default: return beg;
+                case char_type{' '}: case char_type{'\n'}: case char_type{'\t'}: case char_type{'\r'}: beg = parse_spaces(beg, end); break;
+                case char_type{'\"'}: {
+                    bool is_name = false; ++beg;
+                    beg = parse_name_or_string(is_name, buffer, beg, end);
+                    current = is_name ? inserter.emplace(current_parent, buffer, {}, sa) : emplace_value(inserter, current, current_parent,  node_value(buffer, sa));
+                    buffer.clear();
+                } break;
+                case char_type{'{'}: {
+                    current = current->name.empty() ?  inserter.emplace(current_parent, "", document_node_object_tag, sa) :
+                    emplace_value(inserter, current, current_parent, node_value(document_node_object_tag, sa)); 
+                    current_parent = current; ++beg;
+                } break;
+                case char_type{'['}: {
+                    current = current->name.empty() ?  inserter.emplace(current_parent, "", document_node_array_tag, sa) :
+                    emplace_value(inserter, current, current_parent, node_value(document_node_array_tag, sa));
+                    current_parent = current; ++beg;
+                } break;
+                case char_type{'}'}: case char_type{']'}:{
+                    current = current_parent;
+                    current_parent = current_parent->parent; ++beg;
+                } break;
+                case char_type{'0'}: case char_type{'1'}: case char_type{'2'}: case char_type{'3'}: case char_type{'4'}:
+                case char_type{'5'}: case char_type{'6'}: case char_type{'7'}: case char_type{'8'}: case char_type{'9'}:
+                case char_type{'-'}: {
+                    bool is_float = false;
+                    beg = parse_number(is_float, buffer, beg, end);
+                    if (is_float) {
+                        float_type f;
+                        std::from_chars(buffer.data(), buffer.data() + buffer.size(), f, std::chars_format::general);
+                        emplace_value(inserter, current, current_parent, node_value(f, sa));
+                    } else {
+                        int_type i;
+                        std::from_chars(buffer.data(), buffer.data() + buffer.size(), i, 10);
+                        emplace_value(inserter, current, current_parent, node_value(i, sa));
+                    }
+                    buffer.clear();
+                } break;
+                case char_type{'t'}: {
+                    ++beg; if (*beg != char_type{'r'}) { break; }
+                    ++beg; if (*beg != char_type{'u'}) { break; }
+                    ++beg; if (*beg != char_type{'e'}) { break; } ++beg;
+                    emplace_value(inserter, current, current_parent, node_value(true, sa));
+                } break;
+                case char_type{'f'}: {
+                    ++beg; if (*beg != char_type{'a'}) { break; }
+                    ++beg; if (*beg != char_type{'l'}) { break; }
+                    ++beg; if (*beg != char_type{'s'}) { break; }
+                    ++beg; if (*beg != char_type{'e'}) { break; } ++beg;
+                    emplace_value(inserter, current, current_parent, node_value(false, sa));
+                } break;
+                case char_type{'n'}: {
+                    ++beg; if (*beg != char_type{'u'}) { break; }
+                    ++beg; if (*beg != char_type{'l'}) { break; }
+                    ++beg; if (*beg != char_type{'l'}) { break; } ++beg;
+                    emplace_value(inserter, current, current_parent, node_value(sa));
+                }
+                case char_type{','}: ++beg; break;
+                }
+            }
+            // Copy data from depth first tree to breadth first tree.
+            tree.nodes_.resize(inserter.size());
+            std::size_t counter = 1;
+            for (std::size_t i = 1; i != inserter.depth() + 1; ++i) {
+                auto layer = inserter | std::views::filter([i](auto& node) { return node.depth == i; });
+                for (auto& j : layer) {
+                    j.index = counter;
+                    std::construct_at(&tree.nodes_[counter], j.parent->index, j.name, j.value);
+                    ++counter;
+                }
+            }
+            return beg;
+        }
+    };
 }
